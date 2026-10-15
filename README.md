@@ -2,6 +2,8 @@
 
 Sync your Memara memories to your Obsidian vault for local access and editing.
 
+> Requires a Memara account and API key. The plugin makes network requests only to the Memara API server you configure (default `https://api.memara.io`). No telemetry.
+
 ## Features
 
 - One-way sync from Memara to Obsidian
