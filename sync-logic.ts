@@ -12,7 +12,7 @@ export interface MemaraMemory {
 	importance?: number;
 	source?: string;
 	category?: string;
-	metadata?: Record<string, any>;
+	metadata?: Record<string, unknown>;
 }
 
 export function buildFrontmatter(memory: MemaraMemory): string {
@@ -69,7 +69,20 @@ export function parseSyncCursor(cursor: string | null): SyncCursor | null {
 	if (!cursor) return null;
 	
 	try {
-		return JSON.parse(cursor);
+		const parsed: unknown = JSON.parse(cursor);
+		if (!parsed || typeof parsed !== 'object') {
+			return { timestamp: cursor };
+		}
+		const record = parsed as { timestamp?: unknown; lastMemoryId?: unknown };
+		if (typeof record.timestamp !== 'string') {
+			return { timestamp: cursor };
+		}
+		return {
+			timestamp: record.timestamp,
+			...(typeof record.lastMemoryId === 'string'
+				? { lastMemoryId: record.lastMemoryId }
+				: {}),
+		};
 	} catch {
 		return { timestamp: cursor };
 	}

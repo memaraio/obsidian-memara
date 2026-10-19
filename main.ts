@@ -30,7 +30,7 @@ export default class MemaraSyncPlugin extends Plugin {
 			id: 'sync-now',
 			name: 'Sync now',
 			callback: () => {
-				this.performSync();
+				void this.performSync();
 			}
 		});
 
@@ -46,7 +46,10 @@ export default class MemaraSyncPlugin extends Plugin {
 	}
 
 	async loadSettings() {
-		this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData());
+		const stored = (await this.loadData()) as unknown;
+		const overrides =
+			stored && typeof stored === 'object' ? (stored as Partial<MemaraSettings>) : {};
+		this.settings = Object.assign({}, DEFAULT_SETTINGS, overrides);
 	}
 
 	async saveSettings() {
@@ -56,10 +59,9 @@ export default class MemaraSyncPlugin extends Plugin {
 	startAutoSync() {
 		this.stopAutoSync();
 		if (this.settings.syncInterval > 0) {
-			this.syncIntervalId = window.setInterval(
-				() => this.performSync(),
-				this.settings.syncInterval * 60 * 1000
-			);
+			this.syncIntervalId = window.setInterval(() => {
+				void this.performSync();
+			}, this.settings.syncInterval * 60 * 1000);
 		}
 	}
 
@@ -140,7 +142,8 @@ export default class MemaraSyncPlugin extends Plugin {
 			throw new Error(`HTTP ${response.status}: ${response.text}`);
 		}
 
-		return response.json;
+		const body = response.json as unknown;
+		return body as DeltaSyncPage<MemaraMemory>;
 	}
 
 	async ensureFolderExists(folderPath: string) {
@@ -283,7 +286,7 @@ class MemaraSyncSettingTab extends PluginSettingTab {
 			.addButton(button => button
 				.setButtonText('Sync')
 				.onClick(() => {
-					this.plugin.performSync();
+					void this.plugin.performSync();
 				}));
 
 		if (this.plugin.settings.lastSyncCursor) {

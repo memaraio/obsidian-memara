@@ -1,6 +1,6 @@
 {
   "name": "memara-sync",
-  "version": "1.1.1",
+  "version": "1.1.2",
   "description": "Sync your Memara memories into your vault as Markdown files.",
   "main": "main.js",
   "scripts": {
@@ -15,7 +15,6 @@
   "devDependencies": {
     "@types/jest": "^29.5.12",
     "@types/node": "^20.11.17",
-    "builtin-modules": "^3.3.0",
     "esbuild": "0.20.1",
     "jest": "^29.7.0",
     "obsidian": "latest",

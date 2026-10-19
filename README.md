@@ -71,9 +71,9 @@ Open Obsidian Settings > Memara Sync:
 
 ### Manual Sync
 
-Use the command palette (Ctrl/Cmd + P) and search for "Memara: Sync now"
+Use the command palette (Ctrl/Cmd + P) and search for "Memara Sync: Sync now"
 
-Or use the "Sync Now" button in settings
+Or use the Sync button in Memara Sync settings
 
 ### Automatic Sync
 
@@ -109,22 +109,22 @@ The first sync, and any sync after Reset under Last sync, sends `updated_since=1
 
 ## Releasing
 
-BRAT and the community plugin directory download `main.js`, `manifest.json`, and `styles.css` from a **published** GitHub release on the public repository [memaraio/obsidian-memara](https://github.com/memaraio/obsidian-memara). The release tag must be the manifest version alone (`1.1.1`), because Obsidian requests `releases/download/<version>/main.js`.
+BRAT and the community plugin directory download `main.js`, `manifest.json`, and `styles.css` from a **published** GitHub release on the public repository [memaraio/obsidian-memara](https://github.com/memaraio/obsidian-memara). The release tag must be the manifest version alone (`1.1.2`), because Obsidian requests `releases/download/<version>/main.js`.
 
 `versions.json` must stay at the root of that public repository. Obsidian uses it when a user's app is older than `minAppVersion`.
 
 Push this tag on the application repository after `manifest.json`, `package.json`, and `versions.json` all use the same version:
 
 ```bash
-git tag obsidian-plugin/v1.1.1
-git push origin obsidian-plugin/v1.1.1
+git tag obsidian-plugin/v1.1.2
+git push origin obsidian-plugin/v1.1.2
 ```
 
 The package publish workflow then:
 
 1. Checks the tag version against `package.json` and `manifest.json`
 2. Installs, tests, and builds `main.js`
-3. Copies the plugin source into `memaraio/obsidian-memara` and pushes tag `1.1.1` there
+3. Copies the plugin source into `memaraio/obsidian-memara` and pushes tag `1.1.2` there
 
 The public repository workflow `.github/workflows/release.yml` (source file `public-release.yml` in this package) builds again and attaches `main.js`, `manifest.json`, and `styles.css` to that release. The release is published, not left as a draft, so BRAT can install it.
 
