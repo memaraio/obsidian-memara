@@ -47,6 +47,14 @@ export function sanitizeFilename(id: string): string {
 	return id.replace(/[\\/:*?"<>|]/g, '_');
 }
 
+export function memoryFilePath(vaultFolder: string, memoryId: string): string {
+	return `${vaultFolder}/${sanitizeFilename(memoryId)}.md`;
+}
+
+export function trashFilePath(vaultFolder: string, memoryId: string): string {
+	return `${vaultFolder}/.trash/${sanitizeFilename(memoryId)}.md`;
+}
+
 export function buildFileContent(memory: MemaraMemory): string {
 	const frontmatter = buildFrontmatter(memory);
 	return `---\n${frontmatter}---\n\n${memory.content}`;
@@ -85,4 +93,157 @@ export function shouldUpdateCursor(
 	} catch {
 		return true;
 	}
+}
+
+export const INITIAL_SYNC_CURSOR = '1970-01-01T00:00:00Z';
+export const MAX_SYNC_PAGES = 50;
+export const SYNC_PAGE_SIZE = '100';
+
+export interface DeltaTombstone {
+	memory_id: string;
+	deleted_at?: string;
+}
+
+export interface DeltaSyncPage<TMemory extends { id: string }> {
+	memories: TMemory[];
+	tombstones: DeltaTombstone[];
+	has_more: boolean;
+	next_cursor: string | null;
+}
+
+export interface AppliedDeltaPage<TMemory extends { id: string }> {
+	memories: TMemory[];
+	tombstones: DeltaTombstone[];
+	cursorToSave: string | null;
+	pageNumber: number;
+}
+
+export interface DeltaSyncOutcome {
+	pagesFetched: number;
+	cursorsSaved: string[];
+	appliedMemoryIds: string[];
+	appliedTombstoneIds: string[];
+	stopReason: 'complete' | 'stuck_cursor' | 'page_cap';
+}
+
+export function buildDeltaSyncQuery(options: {
+	lastSyncCursor: string | null;
+	spaceId?: string;
+}): Record<string, string> {
+	const params: Record<string, string> = {
+		include_tombstones: 'true',
+		size: SYNC_PAGE_SIZE,
+		updated_since: options.lastSyncCursor || INITIAL_SYNC_CURSOR,
+	};
+	if (options.spaceId) {
+		params.space_id = options.spaceId;
+	}
+	return params;
+}
+
+function memorySyncTimestamp(memory: { updated_at?: string; created_at?: string }): string {
+	return memory.updated_at || memory.created_at || '';
+}
+
+function timestampsEqual(left: string, right: string): boolean {
+	const leftMs = Date.parse(left);
+	const rightMs = Date.parse(right);
+	if (!Number.isNaN(leftMs) && !Number.isNaN(rightMs)) {
+		return leftMs === rightMs;
+	}
+	return left === right;
+}
+
+function assertDeltaSyncPage<TMemory extends { id: string }>(
+	page: DeltaSyncPage<TMemory>
+): void {
+	if (
+		!page ||
+		!Array.isArray(page.memories) ||
+		!Array.isArray(page.tombstones) ||
+		typeof page.has_more !== 'boolean'
+	) {
+		throw new Error('Memara sync response did not include memories and tombstones');
+	}
+}
+
+export async function runDeltaSync<
+	TMemory extends { id: string; updated_at?: string; created_at?: string }
+>(options: {
+	lastSyncCursor: string | null;
+	spaceId?: string;
+	maxPages?: number;
+	fetchPage: (query: Record<string, string>) => Promise<DeltaSyncPage<TMemory>>;
+	onPage: (applied: AppliedDeltaPage<TMemory>) => Promise<void> | void;
+}): Promise<DeltaSyncOutcome> {
+	const maxPages = options.maxPages ?? MAX_SYNC_PAGES;
+	let requestedCursor = options.lastSyncCursor || INITIAL_SYNC_CURSOR;
+	let boundaryIds = new Set<string>();
+	let pagesFetched = 0;
+	const cursorsSaved: string[] = [];
+	const appliedMemoryIds: string[] = [];
+	const appliedTombstoneIds: string[] = [];
+	let stopReason: DeltaSyncOutcome['stopReason'] = 'complete';
+
+	while (pagesFetched < maxPages) {
+		const query = buildDeltaSyncQuery({
+			lastSyncCursor: requestedCursor,
+			spaceId: options.spaceId,
+		});
+		const page = await options.fetchPage(query);
+		assertDeltaSyncPage(page);
+		pagesFetched += 1;
+
+		const memories = page.memories.filter((memory) => {
+			const timestamp = memorySyncTimestamp(memory);
+			return !(timestampsEqual(timestamp, requestedCursor) && boundaryIds.has(memory.id));
+		});
+		const nextCursor = page.next_cursor ?? null;
+		const advanced = shouldUpdateCursor(requestedCursor, nextCursor);
+
+		await options.onPage({
+			memories,
+			tombstones: page.tombstones,
+			cursorToSave: advanced ? nextCursor : null,
+			pageNumber: pagesFetched,
+		});
+
+		for (const memory of memories) {
+			appliedMemoryIds.push(memory.id);
+		}
+		for (const tombstone of page.tombstones) {
+			appliedTombstoneIds.push(tombstone.memory_id);
+		}
+		if (advanced && nextCursor) {
+			cursorsSaved.push(nextCursor);
+		}
+
+		if (!page.has_more) {
+			stopReason = 'complete';
+			break;
+		}
+		if (!advanced || !nextCursor) {
+			stopReason = 'stuck_cursor';
+			break;
+		}
+		if (pagesFetched >= maxPages) {
+			stopReason = 'page_cap';
+			break;
+		}
+
+		boundaryIds = new Set(
+			page.memories
+				.filter((memory) => timestampsEqual(memorySyncTimestamp(memory), nextCursor))
+				.map((memory) => memory.id)
+		);
+		requestedCursor = nextCursor;
+	}
+
+	return {
+		pagesFetched,
+		cursorsSaved,
+		appliedMemoryIds,
+		appliedTombstoneIds,
+		stopReason,
+	};
 }

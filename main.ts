@@ -1,4 +1,5 @@
-import { App, Notice, Plugin, PluginSettingTab, Setting, requestUrl } from 'obsidian';
+import { App, Notice, Plugin, PluginSettingTab, Setting, TFile, normalizePath, requestUrl } from 'obsidian';
+import { DeltaSyncPage, MemaraMemory, memoryFilePath, runDeltaSync, trashFilePath } from './sync-logic';
 
 interface MemaraSettings {
 	serverUrl: string;
@@ -16,33 +17,6 @@ const DEFAULT_SETTINGS: MemaraSettings = {
 	vaultFolder: 'Memara',
 	syncInterval: 0,
 	lastSyncCursor: null
-}
-
-interface MemaraMemory {
-	id: string;
-	content: string;
-	tags: string[];
-	space_id: string;
-	updated_at: string;
-	created_at: string;
-	importance?: number;
-	source?: string;
-	category?: string;
-	metadata?: Record<string, any>;
-}
-
-interface MemoryTombstone {
-	memory_id: string;
-	deleted_at: string;
-}
-
-interface DeltaSyncResponse {
-	memories: MemaraMemory[];
-	tombstones: MemoryTombstone[];
-	total_memories: number;
-	total_tombstones: number;
-	has_more: boolean;
-	next_cursor: string | null;
 }
 
 export default class MemaraSyncPlugin extends Plugin {
@@ -104,60 +78,54 @@ export default class MemaraSyncPlugin extends Plugin {
 
 		try {
 			new Notice('Memara: Starting sync...');
-			
-			const response = await this.fetchDeltaSync();
-			
-			await this.ensureFolderExists(this.settings.vaultFolder);
-			
 			let processedCount = 0;
-			for (const memory of response.memories) {
-				await this.writeMemoryToFile(memory);
-				processedCount++;
-			}
-
 			let deletedCount = 0;
-			for (const tombstone of response.tombstones) {
-				await this.moveToTrash(tombstone.memory_id);
-				deletedCount++;
-			}
 
-			if (response.next_cursor) {
-				this.settings.lastSyncCursor = response.next_cursor;
-				await this.saveSettings();
-			}
+			const outcome = await runDeltaSync({
+				lastSyncCursor: this.settings.lastSyncCursor,
+				spaceId: this.settings.spaceId,
+				fetchPage: (query) => this.fetchDeltaSync(query),
+				onPage: async (applied) => {
+					await this.ensureFolderExists(this.settings.vaultFolder);
+					for (const memory of applied.memories) {
+						await this.writeMemoryToFile(memory);
+						processedCount++;
+					}
+					for (const tombstone of applied.tombstones) {
+						await this.moveToTrash(tombstone.memory_id);
+						deletedCount++;
+					}
+					if (applied.cursorToSave) {
+						this.settings.lastSyncCursor = applied.cursorToSave;
+						await this.saveSettings();
+					}
+				},
+			});
 
-			const message = `Memara: Synced ${processedCount} memories, deleted ${deletedCount}`;
+			let message = `Memara: Synced ${processedCount} memories, deleted ${deletedCount}`;
+			if (outcome.stopReason === 'page_cap') {
+				message += '. More changes remain; sync again to continue';
+			} else if (outcome.stopReason === 'stuck_cursor') {
+				message += '. Sync stopped because the cursor did not advance';
+			}
 			new Notice(message);
 
 		} catch (error) {
-			console.error('Memara sync error:', error);
-			if (error.message?.includes('401')) {
+			const message = error instanceof Error ? error.message : String(error);
+			console.error(`Memara sync error: ${message}`);
+			if (message.includes('401')) {
 				new Notice('Memara: Authentication failed. Please check your API key.');
-			} else if (error.message?.includes('Network')) {
+			} else if (message.includes('Network')) {
 				new Notice('Memara: Network error. Please check your connection.');
 			} else {
-				new Notice(`Memara: Sync failed: ${error.message}`);
+				new Notice(`Memara: Sync failed: ${message}`);
 			}
 		}
 	}
 
-	async fetchDeltaSync(): Promise<DeltaSyncResponse> {
+	async fetchDeltaSync(query: Record<string, string>): Promise<DeltaSyncPage<MemaraMemory>> {
 		const url = new URL('/memories', this.settings.serverUrl);
-		
-		const params: Record<string, string> = {
-			include_tombstones: 'true',
-			size: '100'
-		};
-
-		if (this.settings.spaceId) {
-			params.space_id = this.settings.spaceId;
-		}
-
-		if (this.settings.lastSyncCursor) {
-			params.updated_since = this.settings.lastSyncCursor;
-		}
-
-		url.search = new URLSearchParams(params).toString();
+		url.search = new URLSearchParams(query).toString();
 
 		const response = await requestUrl({
 			url: url.toString(),
@@ -176,23 +144,23 @@ export default class MemaraSyncPlugin extends Plugin {
 	}
 
 	async ensureFolderExists(folderPath: string) {
-		const folder = this.app.vault.getAbstractFileByPath(folderPath);
+		const normalized = normalizePath(folderPath);
+		const folder = this.app.vault.getAbstractFileByPath(normalized);
 		if (!folder) {
-			await this.app.vault.createFolder(folderPath);
+			await this.app.vault.createFolder(normalized);
 		}
 	}
 
 	async writeMemoryToFile(memory: MemaraMemory) {
-		const filename = this.sanitizeFilename(memory.id);
-		const filepath = `${this.settings.vaultFolder}/${filename}.md`;
+		const filepath = normalizePath(memoryFilePath(this.settings.vaultFolder, memory.id));
 		
 		const frontmatter = this.buildFrontmatter(memory);
 		const content = `---\n${frontmatter}---\n\n${memory.content}`;
 
 		const existingFile = this.app.vault.getAbstractFileByPath(filepath);
-		if (existingFile) {
-			await this.app.vault.modify(existingFile as any, content);
-		} else {
+		if (existingFile instanceof TFile) {
+			await this.app.vault.modify(existingFile, content);
+		} else if (!existingFile) {
 			await this.app.vault.create(filepath, content);
 		}
 	}
@@ -225,21 +193,14 @@ export default class MemaraSyncPlugin extends Plugin {
 		return parts.join('\n') + '\n';
 	}
 
-	sanitizeFilename(id: string): string {
-		return id.replace(/[\\/:*?"<>|]/g, '_');
-	}
-
 	async moveToTrash(memoryId: string) {
-		const filename = this.sanitizeFilename(memoryId);
-		const filepath = `${this.settings.vaultFolder}/${filename}.md`;
+		const filepath = normalizePath(memoryFilePath(this.settings.vaultFolder, memoryId));
 		const file = this.app.vault.getAbstractFileByPath(filepath);
 		
-		if (file) {
-			const trashFolder = `${this.settings.vaultFolder}/.trash`;
+		if (file instanceof TFile) {
+			const trashFolder = normalizePath(`${this.settings.vaultFolder}/.trash`);
 			await this.ensureFolderExists(trashFolder);
-			
-			const trashPath = `${trashFolder}/${filename}.md`;
-			await this.app.vault.rename(file, trashPath);
+			await this.app.vault.rename(file, normalizePath(trashFilePath(this.settings.vaultFolder, memoryId)));
 		}
 	}
 }
@@ -259,7 +220,7 @@ class MemaraSyncSettingTab extends PluginSettingTab {
 
 		new Setting(containerEl)
 			.setName('Server URL')
-			.setDesc('Memara API server URL')
+			.setDesc('Memara API server URL (use https://api.staging.memara.io for staging)')
 			.addText(text => text
 				.setPlaceholder('https://api.memara.io')
 				.setValue(this.plugin.settings.serverUrl)
@@ -269,7 +230,7 @@ class MemaraSyncSettingTab extends PluginSettingTab {
 				}));
 
 		new Setting(containerEl)
-			.setName('API Key')
+			.setName('API key')
 			.setDesc('Your Memara API key (stored securely)')
 			.addText(text => {
 				text.setPlaceholder('Enter your API key')
@@ -293,7 +254,7 @@ class MemaraSyncSettingTab extends PluginSettingTab {
 				}));
 
 		new Setting(containerEl)
-			.setName('Vault Folder')
+			.setName('Vault folder')
 			.setDesc('Folder in your vault to sync memories to')
 			.addText(text => text
 				.setPlaceholder('Memara')
@@ -317,7 +278,7 @@ class MemaraSyncSettingTab extends PluginSettingTab {
 				}));
 
 		new Setting(containerEl)
-			.setName('Sync Now')
+			.setName('Sync now')
 			.setDesc('Manually trigger a sync')
 			.addButton(button => button
 				.setButtonText('Sync')
@@ -327,7 +288,7 @@ class MemaraSyncSettingTab extends PluginSettingTab {
 
 		if (this.plugin.settings.lastSyncCursor) {
 			new Setting(containerEl)
-				.setName('Last Sync')
+				.setName('Last sync')
 				.setDesc(`Last synced at: ${this.plugin.settings.lastSyncCursor}`)
 				.addButton(button => button
 					.setButtonText('Reset')
